@@ -78,7 +78,8 @@ def infer_recommended_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
         "gender": choose_column(cols, ["gender", "sex"]),
         "age": choose_column(cols, ["age"]),
         "income": choose_column(cols, ["annual income", "income"]),
-        "spending": choose_column(cols, ["spending score", "spending", "score"]),
+        "spending": choose_column(cols, ["purchase amount", "spending score", "spending", "score"]),
+        "category": choose_column(cols, ["category", "item purchased"]),
         "category_a": choose_column(cols, ["segment", "membership", "city", "payment", "gender", "category"]),
         "category_b": choose_column(cols, ["category", "payment", "channel", "product", "city", "gender"]),
     }
@@ -128,13 +129,23 @@ def cohens_d(x1: np.ndarray, x2: np.ndarray) -> float:
     return (np.mean(x1) - np.mean(x2)) / pooled
 
 
-def cramers_v(contingency: pd.DataFrame) -> float:
-    chi2, _, _, _ = stats.chi2_contingency(contingency)
-    n = contingency.to_numpy().sum()
-    r, k = contingency.shape
-    if n == 0 or min(r, k) <= 1:
+def welch_df(x1: np.ndarray, x2: np.ndarray) -> float:
+    """Welch–Satterthwaite degrees of freedom."""
+    x1 = np.asarray(x1)
+    x2 = np.asarray(x2)
+    n1, n2 = len(x1), len(x2)
+    v1 = np.var(x1, ddof=1)
+    v2 = np.var(x2, ddof=1)
+    num = (v1 / n1 + v2 / n2) ** 2
+    den = (v1**2) / ((n1**2) * (n1 - 1)) + (v2**2) / ((n2**2) * (n2 - 1))
+    return num / den
+
+
+def rank_biserial_from_u(u: float, n1: int, n2: int) -> float:
+    """Rank-biserial correlation effect size for Mann–Whitney U."""
+    if n1 <= 0 or n2 <= 0:
         return np.nan
-    return np.sqrt(chi2 / (n * (min(r, k) - 1)))
+    return 1 - (2 * u) / (n1 * n2)
 
 
 def ci_mean_difference_welch(x1: np.ndarray, x2: np.ndarray, alpha: float = 0.05) -> Tuple[float, float]:
@@ -152,6 +163,16 @@ def ci_mean_difference_welch(x1: np.ndarray, x2: np.ndarray, alpha: float = 0.05
 
 def decision_text(p: float, alpha: float = 0.05) -> str:
     return "Reject H₀" if p < alpha else "Fail to reject H₀"
+
+
+def effect_size_label_abs(val: float) -> str:
+    """Generic small/medium/large label for absolute effect size."""
+    a = abs(val)
+    if a < 0.3:
+        return "small"
+    if a < 0.5:
+        return "medium"
+    return "large"
 
 
 # -----------------------------
@@ -188,7 +209,8 @@ cat_cols = [c for c in df.columns if c not in num_cols]
 
 st.subheader("Summary Statistics (Numerical)")
 if num_cols:
-    st.dataframe(df[num_cols].describe().T, use_container_width=True)
+    num_cols_filtered = [c for c in num_cols if "customer id" not in c.lower()]
+    st.dataframe(df[num_cols_filtered].describe().T, use_container_width=True)
 else:
     st.warning("No numeric columns detected; statistical tests requiring numeric outcomes cannot run.")
 
@@ -198,213 +220,394 @@ if not cat_cols:
 if not num_cols:
     st.stop()
 
-st.sidebar.header("Variable selection")
-def safe_index(options: List[str], value: Optional[str], fallback: int = 0) -> int:
-    if value in options:
-        return options.index(value)
-    return fallback
-
-rq1_group = st.sidebar.selectbox(
-    "RQ1 group variable (categorical)",
-    cat_cols,
-    index=safe_index(cat_cols, rec["gender"]),
-)
-rq1_outcome = st.sidebar.selectbox(
-    "RQ1 outcome variable (numeric)",
-    num_cols,
-    index=safe_index(num_cols, rec["spending"]),
-)
-
-rq2_group = st.sidebar.selectbox(
-    "RQ2 group variable (3+ categories)",
-    cat_cols,
-    index=safe_index(cat_cols, rec["category_a"]),
-)
-rq2_outcome = st.sidebar.selectbox(
-    "RQ2 outcome variable (numeric)",
-    num_cols,
-    index=safe_index(num_cols, rec["income"]),
-)
-
-rq3_a = st.sidebar.selectbox("RQ3 categorical variable A", cat_cols, index=safe_index(cat_cols, rec["category_a"]))
-rq3_b = st.sidebar.selectbox(
-    "RQ3 categorical variable B",
-    cat_cols,
-    index=safe_index(cat_cols, rec["category_b"], fallback=min(1, len(cat_cols) - 1)),
-)
+# Fixed variables for the three research questions
+age_col = rec["age"]
+gender_col = rec["gender"]
+spending_col = rec["spending"]
+category_col = rec["category"]
 
 st.header("2) Research Questions & Hypotheses")
 st.markdown(
-    f"""
-1. **RQ1:** Does mean **{rq1_outcome}** differ between two largest groups in **{rq1_group}**?
-   - H₀: μ₁ = μ₂
-   - H₁: μ₁ ≠ μ₂
+    """
+**Research Question 1: Relationship between Age and Purchase Amount**
 
-2. **RQ2:** Does mean **{rq2_outcome}** differ across levels of **{rq2_group}**?
-   - H₀: μ₁ = μ₂ = ... = μₖ
-   - H₁: At least one group mean differs.
+**Variables:**
+- **Age** (numerical, predictor)
+- **Spending Score** (numerical, outcome)
 
-3. **RQ3:** Is there an association between **{rq3_a}** and **{rq3_b}**?
-   - H₀: The two variables are independent.
-   - H₁: The two variables are associated.
+**Hypotheses:**
+- **H₀ (Null):** There is no correlation between age and purchase amount (ρ = 0).
+- **H₁ (Alternative):** There is a statistically significant correlation between age and purchase amount (ρ ≠ 0).
+
+**Planned Test:** Pearson correlation (if assumptions look reasonable) or Spearman rank correlation (non-parametric alternative).
+
+---
+
+**Research Question 2: Gender Difference in Purchase Amount**
+
+**Variables:**
+- **Gender** (categorical: two largest categories)
+- **Spending Score** (numerical outcome)
+
+**Hypotheses:**
+- **H₀ (Null):** The two gender groups do not differ in mean spending (μ₁ = μ₂).
+- **H₁ (Alternative):** The two gender groups differ in mean spending (μ₁ ≠ μ₂).
+
+**Planned Test:** Independent samples t-test (or Welch’s t-test if variances differ) or Mann–Whitney U test (non-parametric alternative).
+
+---
+
+**Research Question 3: Gender Difference in Clothing Purchases**
+
+**Variables:**
+- **Gender** (categorical: two largest categories within Clothing)
+- **Spending Score** (numerical outcome)
+
+**Hypotheses:**
+- **H₀ (Null):** The two gender groups do not differ in mean clothing spending (μ₁ = μ₂).
+- **H₁ (Alternative):** The two gender groups differ in mean clothing spending (μ₁ ≠ μ₂).
+
+**Planned Test:** Independent samples t-test (or Welch’s t-test) or Mann–Whitney U test.
 """
 )
 
-st.header("3) Assumptions, Test Selection, and Results")
+st.header("3) Assumption Checking & Test Selection")
 
 # -------- RQ1 --------
-st.subheader("RQ1: Two-group mean comparison")
-rq1_df = df[[rq1_group, rq1_outcome]].dropna().copy()
-counts = rq1_df[rq1_group].value_counts()
-if counts.shape[0] < 2:
-    st.warning("Need at least two categories to run RQ1.")
+st.subheader("RQ1: Correlation between Age and Purchase Amount")
+
+if age_col is None or spending_col is None:
+    st.warning("Could not identify Age or Spending Score columns.")
 else:
-    top2 = counts.index[:2]
-    g1 = rq1_df.loc[rq1_df[rq1_group] == top2[0], rq1_outcome].to_numpy()
-    g2 = rq1_df.loc[rq1_df[rq1_group] == top2[1], rq1_outcome].to_numpy()
+    rq1_df = df[[age_col, spending_col]].dropna().copy()
 
-    if len(g1) < 3 or len(g2) < 3:
-        st.warning("Each group should have at least 3 observations for robust assumption checks.")
+    if rq1_df.shape[0] < 4:
+        st.warning("Not enough observations for RQ1 correlation analysis.")
     else:
-        sh1 = stats.shapiro(g1 if len(g1) <= 500 else np.random.default_rng(42).choice(g1, 500, replace=False))
-        sh2 = stats.shapiro(g2 if len(g2) <= 500 else np.random.default_rng(42).choice(g2, 500, replace=False))
-        lev = stats.levene(g1, g2)
+        st.write("**Assumption Checks (practical):**")
+        st.caption("Pearson is best for roughly linear relationships and is sensitive to outliers; Spearman is rank-based and more robust.")
 
-        normal_ok = (sh1.pvalue > 0.05) and (sh2.pvalue > 0.05)
-        equal_var_ok = lev.pvalue > 0.05
+        # Normality tests (Shapiro-Wilk; sample if huge)
+        rng = np.random.default_rng(42)
+        age_sample = rq1_df[age_col].to_numpy()
+        spend_sample = rq1_df[spending_col].to_numpy()
+        if len(rq1_df) > 500:
+            age_sample = rng.choice(age_sample, 500, replace=False)
+            spend_sample = rng.choice(spend_sample, 500, replace=False)
 
-        if normal_ok:
-            t_res = stats.ttest_ind(g1, g2, equal_var=equal_var_ok)
-            test_name = "Independent t-test"
-            stat_value = t_res.statistic
-            p_value = t_res.pvalue
-            df_txt = "Welch-adjusted" if not equal_var_ok else f"{len(g1)+len(g2)-2}"
+        sh_age = stats.shapiro(age_sample)
+        sh_spend = stats.shapiro(spend_sample)
+
+        age_normal = sh_age.pvalue > 0.05
+        spend_normal = sh_spend.pvalue > 0.05
+        both_normal = age_normal and spend_normal
+
+        st.write(f"- Shapiro-Wilk normality test for Age: p = {sh_age.pvalue:.4f} {'✓' if age_normal else '✗'}")
+        st.write(f"- Shapiro-Wilk normality test for Spending Score: p = {sh_spend.pvalue:.4f} {'✓' if spend_normal else '✗'}")
+
+        # Perform correlation test
+        if both_normal:
+            corr_res = stats.pearsonr(rq1_df[age_col], rq1_df[spending_col])
+            test_name_rq1 = "Pearson correlation"
         else:
-            mw = stats.mannwhitneyu(g1, g2, alternative="two-sided")
-            test_name = "Mann-Whitney U (non-parametric fallback)"
-            stat_value = mw.statistic
-            p_value = mw.pvalue
-            df_txt = "N/A"
+            corr_res = stats.spearmanr(rq1_df[age_col], rq1_df[spending_col])
+            test_name_rq1 = "Spearman rank correlation (non-parametric)"
 
-        d = cohens_d(g1, g2)
-        ci_low, ci_high = ci_mean_difference_welch(g1, g2)
+        corr_coef = float(corr_res[0])
+        p_val_rq1 = float(corr_res[1])
 
-        st.write(f"**Chosen test:** {test_name}")
-        st.write(f"Shapiro-Wilk p-values: {top2[0]}={sh1.pvalue:.4f}, {top2[1]}={sh2.pvalue:.4f}")
-        st.write(f"Levene p-value: {lev.pvalue:.4f}")
-        st.write(f"Test statistic: {stat_value:.4f}")
-        st.write(f"Degrees of freedom: {df_txt}")
-        st.write(f"p-value: {p_value:.4g}")
-        st.write(f"Cohen's d: {d:.3f}")
-        st.write(f"95% CI for mean difference ({top2[0]} - {top2[1]}): [{ci_low:.3f}, {ci_high:.3f}]")
-        st.success(decision_text(p_value))
+        st.write(f"**Chosen test:** {test_name_rq1}")
+        st.write(f"- Correlation coefficient (r): {corr_coef:.4f}")
+        st.write(f"- p-value: {p_val_rq1:.4g}")
+        st.write(f"- Effect size (|r|): {abs(corr_coef):.3f} ({effect_size_label_abs(corr_coef)})")
+        st.success(decision_text(p_val_rq1))
 
-        fig1, ax1 = plt.subplots(figsize=(8, 4))
-        plot_df = rq1_df[rq1_df[rq1_group].isin(top2)].copy()
-        sns.boxplot(data=plot_df, x=rq1_group, y=rq1_outcome, ax=ax1)
-        sns.stripplot(data=plot_df, x=rq1_group, y=rq1_outcome, color="black", alpha=0.4, ax=ax1)
-        ax1.set_title(f"{rq1_outcome} by {rq1_group} (RQ1)")
+        # Visualization for RQ1
+        fig1, ax1 = plt.subplots(figsize=(8, 5))
+        ax1.scatter(rq1_df[age_col], rq1_df[spending_col], alpha=0.5, s=30)
+
+        # Trend line (simple linear fit for visualization)
+        z = np.polyfit(rq1_df[age_col], rq1_df[spending_col], 1)
+        poly = np.poly1d(z)
+        x_sorted = rq1_df[age_col].sort_values()
+        ax1.plot(x_sorted, poly(x_sorted), "r-", alpha=0.8, linewidth=2)
+
+        ax1.set_xlabel(age_col, fontsize=11)
+        ax1.set_ylabel(spending_col, fontsize=11)
+        ax1.set_title(f"RQ1: {age_col} vs {spending_col}\n{test_name_rq1}: r = {corr_coef:.3f}, p = {p_val_rq1:.4g}")
+        ax1.grid(alpha=0.3)
         st.pyplot(fig1)
-        st.caption("Box + strip plot for the two compared groups in RQ1.")
+        st.caption("Scatter plot with a fitted trend line (visual aid).")
 
 # -------- RQ2 --------
-st.subheader("RQ2: Multi-group mean comparison")
-rq2_df = df[[rq2_group, rq2_outcome]].dropna().copy()
-groups = [g[rq2_outcome].to_numpy() for _, g in rq2_df.groupby(rq2_group) if len(g) >= 3]
+st.subheader("RQ2: Gender Difference in Purchase Amount")
 
-if len(groups) < 3:
-    st.warning("Need at least 3 groups (with at least 3 rows each) for RQ2.")
+if gender_col not in df.columns or spending_col not in df.columns:
+    st.warning("Could not identify Gender or Spending Score columns.")
 else:
-    shapiro_ps = []
-    rng = np.random.default_rng(42)
-    for arr in groups:
-        sample = arr if len(arr) <= 500 else rng.choice(arr, 500, replace=False)
-        shapiro_ps.append(stats.shapiro(sample).pvalue)
+    rq2_df = df[[gender_col, spending_col]].dropna().copy()
+    counts_rq2 = rq2_df[gender_col].value_counts()
 
-    lev2 = stats.levene(*groups)
-    normal_ok2 = all(p > 0.05 for p in shapiro_ps)
-    equal_var_ok2 = lev2.pvalue > 0.05
-
-    if normal_ok2 and equal_var_ok2:
-        aov = stats.f_oneway(*groups)
-        test2 = "One-way ANOVA"
-        stat2 = aov.statistic
-        p2 = aov.pvalue
+    if counts_rq2.shape[0] < 2:
+        st.warning("Need at least two gender categories to run RQ2.")
     else:
-        kw = stats.kruskal(*groups)
-        test2 = "Kruskal-Wallis (non-parametric fallback)"
-        stat2 = kw.statistic
-        p2 = kw.pvalue
+        top2_rq2 = counts_rq2.index[:2]
+        g1_rq2 = rq2_df.loc[rq2_df[gender_col] == top2_rq2[0], spending_col].to_numpy()
+        g2_rq2 = rq2_df.loc[rq2_df[gender_col] == top2_rq2[1], spending_col].to_numpy()
 
-    st.write(f"**Chosen test:** {test2}")
-    st.write(f"Levene p-value: {lev2.pvalue:.4f}")
-    st.write(f"Minimum Shapiro p-value across groups: {min(shapiro_ps):.4f}")
-    st.write(f"Test statistic: {stat2:.4f}")
-    st.write(f"p-value: {p2:.4g}")
-    st.success(decision_text(p2))
+        if len(g1_rq2) < 3 or len(g2_rq2) < 3:
+            st.warning("Each group should have at least 3 observations for robust assumption checks.")
+        else:
+            st.write("**Assumption Checks:**")
 
-    fig2, ax2 = plt.subplots(figsize=(10, 4))
-    sns.violinplot(data=rq2_df, x=rq2_group, y=rq2_outcome, inner="box", ax=ax2)
-    ax2.set_title(f"{rq2_outcome} distribution by {rq2_group} (RQ2)")
-    ax2.tick_params(axis="x", rotation=30)
-    st.pyplot(fig2)
-    st.caption("Violin/box summaries showing group-wise distributions in RQ2.")
+            rng = np.random.default_rng(42)
+            s1 = g1_rq2 if len(g1_rq2) <= 500 else rng.choice(g1_rq2, 500, replace=False)
+            s2 = g2_rq2 if len(g2_rq2) <= 500 else rng.choice(g2_rq2, 500, replace=False)
+
+            sh1_rq2 = stats.shapiro(s1)
+            sh2_rq2 = stats.shapiro(s2)
+            lev_rq2 = stats.levene(g1_rq2, g2_rq2)
+
+            normal_ok_rq2 = (sh1_rq2.pvalue > 0.05) and (sh2_rq2.pvalue > 0.05)
+            equal_var_ok_rq2 = lev_rq2.pvalue > 0.05
+
+            st.write(
+                f"- Shapiro-Wilk p-values: {top2_rq2[0]} = {sh1_rq2.pvalue:.4f} {'✓' if sh1_rq2.pvalue > 0.05 else '✗'}, "
+                f"{top2_rq2[1]} = {sh2_rq2.pvalue:.4f} {'✓' if sh2_rq2.pvalue > 0.05 else '✗'}"
+            )
+            st.write(
+                f"- Levene's test p-value: {lev_rq2.pvalue:.4f} "
+                f"{'✓ (equal variances)' if equal_var_ok_rq2 else '✗ (unequal variances → Welch)'}"
+            )
+
+            # Choose test
+            if normal_ok_rq2:
+                t_res_rq2 = stats.ttest_ind(g1_rq2, g2_rq2, equal_var=equal_var_ok_rq2)
+                test2 = "Independent t-test" if equal_var_ok_rq2 else "Welch t-test"
+                stat2 = float(t_res_rq2.statistic)
+                p2 = float(t_res_rq2.pvalue)
+                df2 = (len(g1_rq2) + len(g2_rq2) - 2) if equal_var_ok_rq2 else welch_df(g1_rq2, g2_rq2)
+
+                # Effect size + CI (parametric case)
+                d_rq2 = cohens_d(g1_rq2, g2_rq2)
+                ci_low_rq2, ci_high_rq2 = ci_mean_difference_welch(g1_rq2, g2_rq2)
+
+                st.write(f"**Chosen test:** {test2}")
+                st.write(f"- Test statistic: t({df2:.1f}) = {stat2:.4f}")
+                st.write(f"- p-value: {p2:.4g}")
+                st.write(f"- Effect size (Cohen's d): {d_rq2:.3f} ({effect_size_label_abs(d_rq2)})")
+                st.write(f"- 95% CI for mean difference ({top2_rq2[0]} - {top2_rq2[1]}): [{ci_low_rq2:.3f}, {ci_high_rq2:.3f}]")
+                st.success(decision_text(p2))
+
+                title_stat = f"t({df2:.1f}) = {stat2:.3f}"
+                effect_text = f"d = {d_rq2:.3f}"
+            else:
+                mw_rq2 = stats.mannwhitneyu(g1_rq2, g2_rq2, alternative="two-sided")
+                test2 = "Mann–Whitney U test (non-parametric)"
+                stat2 = float(mw_rq2.statistic)
+                p2 = float(mw_rq2.pvalue)
+
+                rbc = rank_biserial_from_u(stat2, len(g1_rq2), len(g2_rq2))
+
+                st.write(f"**Chosen test:** {test2}")
+                st.write(f"- Test statistic: U = {stat2:.4f}")
+                st.write(f"- p-value: {p2:.4g}")
+                st.write(f"- Effect size (rank-biserial r): {rbc:.3f} ({effect_size_label_abs(rbc)})")
+                st.caption("For the non-parametric test, a rank-based effect size is reported. Mean-difference CI is provided in the parametric t-test case.")
+                st.success(decision_text(p2))
+
+                title_stat = f"U = {stat2:.1f}"
+                effect_text = f"r (rank-biserial) = {rbc:.3f}"
+
+            # Visualization for RQ2
+            fig2, ax2 = plt.subplots(figsize=(8, 5))
+            plot_df_rq2 = rq2_df[rq2_df[gender_col].isin(top2_rq2)].copy()
+            sns.boxplot(data=plot_df_rq2, x=gender_col, y=spending_col, ax=ax2, width=0.6)
+            sns.stripplot(data=plot_df_rq2, x=gender_col, y=spending_col, color="black", alpha=0.4, ax=ax2, size=4)
+            ax2.set_xlabel(gender_col, fontsize=11)
+            ax2.set_ylabel(spending_col, fontsize=11)
+            ax2.set_title(f"RQ2: {spending_col} by {gender_col}\n{test2}: {title_stat}, p = {p2:.4g}, {effect_text}")
+            ax2.set_xticklabels([f"{top2_rq2[0]}\n(n={len(g1_rq2)})", f"{top2_rq2[1]}\n(n={len(g2_rq2)})"])
+            ax2.grid(alpha=0.3, axis="y")
+            st.pyplot(fig2)
+            st.caption("Box plot with individual data points. Each box shows median and IQR; whiskers extend to 1.5×IQR.")
 
 # -------- RQ3 --------
-st.subheader("RQ3: Association between categorical variables")
-rq3_df = df[[rq3_a, rq3_b]].dropna().copy()
-ct = pd.crosstab(rq3_df[rq3_a], rq3_df[rq3_b])
+st.subheader("RQ3: Gender Difference in Clothing Spending")
 
-if ct.shape[0] < 2 or ct.shape[1] < 2:
-    st.warning("Need at least a 2x2 contingency table for RQ3.")
+if category_col is None:
+    st.warning("Could not find a category/item column for filtering Clothing.")
 else:
-    chi2, p3, dof3, expected = stats.chi2_contingency(ct)
-    cv = cramers_v(ct)
-    min_expected = float(np.min(expected))
+    # Robust Clothing filter (case-insensitive; substring match)
+    rq3_df_filtered = df[df[category_col].astype(str).str.contains("clothing", case=False, na=False)].copy()
 
-    if min_expected < 5:
-        st.warning(
-            f"Some expected counts are < 5 (minimum expected={min_expected:.2f}); "
-            "interpret χ² approximation with caution."
-        )
+    if rq3_df_filtered.shape[0] < 10:
+        st.warning(f"Not enough Clothing records ({rq3_df_filtered.shape[0]}) to perform RQ3 analysis reliably.")
+    else:
+        if gender_col not in rq3_df_filtered.columns or spending_col not in rq3_df_filtered.columns:
+            st.warning("Could not identify Gender or Spending Score columns for RQ3.")
+        else:
+            rq3_df_analysis = rq3_df_filtered[[gender_col, spending_col]].dropna().copy()
+            counts_rq3 = rq3_df_analysis[gender_col].value_counts()
 
-    st.write("**Chosen test:** Chi-square test of independence")
-    st.write(f"χ² statistic: {chi2:.4f}")
-    st.write(f"Degrees of freedom: {dof3}")
-    st.write(f"p-value: {p3:.4g}")
-    st.write(f"Cramer's V: {cv:.3f}")
-    st.success(decision_text(p3))
+            if counts_rq3.shape[0] < 2:
+                st.warning("Need at least two gender categories in Clothing purchases for RQ3.")
+            else:
+                top2_rq3 = counts_rq3.index[:2]
+                g1_rq3 = rq3_df_analysis.loc[rq3_df_analysis[gender_col] == top2_rq3[0], spending_col].to_numpy()
+                g2_rq3 = rq3_df_analysis.loc[rq3_df_analysis[gender_col] == top2_rq3[1], spending_col].to_numpy()
 
-    fig3, ax3 = plt.subplots(figsize=(10, 4))
-    ct_prop = ct.div(ct.sum(axis=1), axis=0)
-    ct_prop.plot(kind="bar", stacked=True, ax=ax3)
-    ax3.set_ylabel("Proportion within group")
-    ax3.set_title(f"Proportional stacked bars: {rq3_a} vs {rq3_b} (RQ3)")
-    ax3.legend(title=rq3_b, bbox_to_anchor=(1.02, 1), loc="upper left")
-    st.pyplot(fig3)
-    st.caption("Stacked proportions used to visually support the χ² result.")
+                if len(g1_rq3) < 3 or len(g2_rq3) < 3:
+                    st.warning("Each group should have at least 3 observations for robust assumption checks.")
+                else:
+                    st.write("**Assumption Checks:**")
+
+                    rng = np.random.default_rng(42)
+                    s1 = g1_rq3 if len(g1_rq3) <= 500 else rng.choice(g1_rq3, 500, replace=False)
+                    s2 = g2_rq3 if len(g2_rq3) <= 500 else rng.choice(g2_rq3, 500, replace=False)
+
+                    sh1_rq3 = stats.shapiro(s1)
+                    sh2_rq3 = stats.shapiro(s2)
+                    lev_rq3 = stats.levene(g1_rq3, g2_rq3)
+
+                    normal_ok_rq3 = (sh1_rq3.pvalue > 0.05) and (sh2_rq3.pvalue > 0.05)
+                    equal_var_ok_rq3 = lev_rq3.pvalue > 0.05
+
+                    st.write(
+                        f"- Shapiro-Wilk p-values: {top2_rq3[0]} = {sh1_rq3.pvalue:.4f} {'✓' if sh1_rq3.pvalue > 0.05 else '✗'}, "
+                        f"{top2_rq3[1]} = {sh2_rq3.pvalue:.4f} {'✓' if sh2_rq3.pvalue > 0.05 else '✗'}"
+                    )
+                    st.write(
+                        f"- Levene's test p-value: {lev_rq3.pvalue:.4f} "
+                        f"{'✓ (equal variances)' if equal_var_ok_rq3 else '✗ (unequal variances → Welch)'}"
+                    )
+                    st.write(f"- Sample sizes: {top2_rq3[0]} (n={len(g1_rq3)}), {top2_rq3[1]} (n={len(g2_rq3)})")
+
+                    # Choose test
+                    if normal_ok_rq3:
+                        t_res_rq3 = stats.ttest_ind(g1_rq3, g2_rq3, equal_var=equal_var_ok_rq3)
+                        test3 = "Independent t-test" if equal_var_ok_rq3 else "Welch t-test"
+                        stat3 = float(t_res_rq3.statistic)
+                        p3 = float(t_res_rq3.pvalue)
+                        df3 = (len(g1_rq3) + len(g2_rq3) - 2) if equal_var_ok_rq3 else welch_df(g1_rq3, g2_rq3)
+
+                        d_rq3 = cohens_d(g1_rq3, g2_rq3)
+                        ci_low_rq3, ci_high_rq3 = ci_mean_difference_welch(g1_rq3, g2_rq3)
+
+                        st.write(f"**Chosen test:** {test3}")
+                        st.write(f"- Test statistic: t({df3:.1f}) = {stat3:.4f}")
+                        st.write(f"- p-value: {p3:.4g}")
+                        st.write(f"- Effect size (Cohen's d): {d_rq3:.3f} ({effect_size_label_abs(d_rq3)})")
+                        st.write(f"- 95% CI for mean difference ({top2_rq3[0]} - {top2_rq3[1]}): [{ci_low_rq3:.3f}, {ci_high_rq3:.3f}]")
+                        st.success(decision_text(p3))
+
+                        title_stat = f"t({df3:.1f}) = {stat3:.3f}"
+                        effect_text = f"d = {d_rq3:.3f}"
+                    else:
+                        mw_rq3 = stats.mannwhitneyu(g1_rq3, g2_rq3, alternative="two-sided")
+                        test3 = "Mann–Whitney U test (non-parametric)"
+                        stat3 = float(mw_rq3.statistic)
+                        p3 = float(mw_rq3.pvalue)
+
+                        rbc3 = rank_biserial_from_u(stat3, len(g1_rq3), len(g2_rq3))
+
+                        st.write(f"**Chosen test:** {test3}")
+                        st.write(f"- Test statistic: U = {stat3:.4f}")
+                        st.write(f"- p-value: {p3:.4g}")
+                        st.write(f"- Effect size (rank-biserial r): {rbc3:.3f} ({effect_size_label_abs(rbc3)})")
+                        st.caption("For the non-parametric test, a rank-based effect size is reported. Mean-difference CI is provided in the parametric t-test case.")
+                        st.success(decision_text(p3))
+
+                        title_stat = f"U = {stat3:.1f}"
+                        effect_text = f"r (rank-biserial) = {rbc3:.3f}"
+
+                    # Visualization for RQ3
+                    fig3, ax3 = plt.subplots(figsize=(8, 5))
+                    plot_df_rq3 = rq3_df_analysis[rq3_df_analysis[gender_col].isin(top2_rq3)].copy()
+                    sns.boxplot(data=plot_df_rq3, x=gender_col, y=spending_col, ax=ax3, width=0.6)
+                    sns.stripplot(data=plot_df_rq3, x=gender_col, y=spending_col, color="black", alpha=0.4, ax=ax3, size=4)
+                    ax3.set_xlabel(gender_col, fontsize=11)
+                    ax3.set_ylabel(spending_col, fontsize=11)
+                    ax3.set_title(f"RQ3: Clothing {spending_col} by {gender_col}\n{test3}: {title_stat}, p = {p3:.4g}, {effect_text}")
+                    ax3.set_xticklabels([f"{top2_rq3[0]}\n(n={len(g1_rq3)})", f"{top2_rq3[1]}\n(n={len(g2_rq3)})"])
+                    ax3.grid(alpha=0.3, axis="y")
+                    st.pyplot(fig3)
+                    st.caption("Box plot with individual data points (Clothing records only).")
 
 st.header("4) Interpretation and Discussion")
+
+st.subheader("RQ1: Relationship between Age and Purchase Amount")
 st.markdown(
     """
-- Each test reports statistic, p-value, and decision on H₀.
-- Practical significance is included using effect sizes (Cohen's d and Cramer's V).
-- Uncertainty is communicated with a 95% CI for a key mean-difference result (RQ1).
-- Assumption checks drive test choice (parametric vs non-parametric).
-- Data quality checks (missing values, duplicates, dtypes, unique counts) are shown before inference.
+**Interpretation:**
+This analysis tested whether customer age is associated with spending. Correlation quantifies direction and strength.
+
+**Key points:**
+- **p < 0.05** suggests evidence of a non-zero association.
+- Effect size **|r|** indicates practical strength (rough guide: <0.3 small, 0.3–0.5 medium, >0.5 large).
+- Correlation does not imply causation; other variables (e.g., income) may confound the association.
 """
 )
 
-st.header("5) Documentation")
+st.subheader("RQ2: Gender Difference in Purchase Amount")
+st.markdown(
+    """
+**Interpretation:**
+This analysis compared two gender groups' spending to assess whether typical spending differs by gender.
+
+**Key points:**
+- **t-test/Welch** is used when normality assumptions are satisfied; **Mann–Whitney U** is applied otherwise.
+- **Cohen's d** and a **95% CI for the mean difference** are reported for t-tests.
+- **Rank-based effect size** (rank-biserial r) is reported for Mann–Whitney U, which is robust to non-normality.
+
+**Practical note:**
+Small p-values can occur with tiny effects in large samples. Interpretation should always include effect size and the confidence interval (when applicable).
+"""
+)
+
+st.subheader("RQ3: Gender Difference in Clothing Spending")
+st.markdown(
+    """
+**Interpretation:**
+This analysis repeated the gender comparison within Clothing records only to reveal category-specific differences.
+
+**Key points:**
+- Results may be less conclusive if Clothing sample sizes are smaller, reducing statistical power.
+- Interpretation balances statistical evidence (p-value) with practical magnitude (effect size).
+"""
+)
+
+st.header("5) Summary and Conclusions")
+st.markdown(
+    """
+This analysis addressed three research questions:
+
+1. **RQ1 (Correlation):** Assessed association between age and spending.
+2. **RQ2 (Group difference):** Assessed gender differences in overall spending via t-test/Welch or Mann–Whitney U.
+3. **RQ3 (Filtered group difference):** Assessed gender differences in Clothing spending specifically.
+
+**Strengths:**
+- Assumption checks guide test selection (Shapiro–Wilk normality; Levene variance homogeneity).
+- p-values, effect sizes, and confidence intervals are reported (parametric case).
+- Multiple visualizations (scatter plot and boxplots) support the statistical findings.
+
+**Limitations:**
+- Cross-sectional data design limits causal inference.
+- Potential confounders (e.g., income, preferences) are not controlled.
+- Multiple comparisons can inflate false-positive risk; correction should be considered for extended analyses.
+"""
+)
+
+st.header("6) Documentation")
 st.markdown(
     f"""
 **Dataset source:** `{DATASET_ID}` via `kagglehub.dataset_download(...)`.
 
-This app follows the Week 4 workflow:
-1. Formulate H₀/H₁ for 3 research questions.
-2. Check assumptions (Shapiro-Wilk, Levene, expected cell counts for χ²).
-3. Run appropriate tests and robust alternatives when assumptions fail.
-4. Report statistics, p-values, effect sizes, and confidence intervals.
-5. Visualize and interpret findings in context.
+**Workflow:**
+1. Define null and alternative hypotheses (H₀/H₁) for three research questions.
+2. Check statistical assumptions (Shapiro–Wilk normality test; Levene variance homogeneity test).
+3. Select appropriate statistical tests (Pearson/Spearman correlation; t-test/Welch t-test; Mann–Whitney U as alternative).
+4. Report test statistic, degrees of freedom (when applicable), p-values, effect sizes, and confidence intervals.
+5. Visualize findings with corresponding plots and interpret results in context.
 """
 )
